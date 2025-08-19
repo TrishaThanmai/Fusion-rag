@@ -1,18 +1,22 @@
-from google.colab import files
-uploaded = files.upload()
-
-
+import streamlit as st
 import os
 import zipfile
-import subprocess
 
-# Unzip faiss_index.zip into "content/"
-if os.path.exists("faiss_index.zip"):
+st.title("Fusion RAG Chatbot")
+
+# File upload widget
+uploaded_file = st.file_uploader("Upload FAISS index zip", type=["zip"])
+
+if uploaded_file is not None:
+    # Save uploaded file
+    with open("faiss_index.zip", "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    # Unzip it
     with zipfile.ZipFile("faiss_index.zip", "r") as zip_ref:
         zip_ref.extractall("content/")
 
-# Install required packages (only needed locally; on Streamlit Cloud use requirements.txt instead)
-# subprocess.run(["pip", "install", "torch", "langchain", "transformers", "sentence-transformers", "faiss-cpu"], check=True)
+    st.success("FAISS index extracted successfully!")
 
 
 faiss_index_folder = "/content/faiss_index"
