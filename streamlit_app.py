@@ -20,7 +20,11 @@ if uploaded_file is not None:
 
 
 faiss_index_folder = "/content/faiss_index"
-from huggingface_hub import login
+
+from huggingface_hub import HfApi
+api = HfApi()
+api.login(token="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")
+
 
 login("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")
 
