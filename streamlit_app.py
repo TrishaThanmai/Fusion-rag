@@ -1,9 +1,19 @@
 from google.colab import files
 uploaded = files.upload()
 
-!unzip faiss_index.zip -d /content/
 
-!pip install torch langchain transformers sentence-transformers faiss-cpu langchain-community
+import os
+import zipfile
+import subprocess
+
+# Unzip faiss_index.zip into "content/"
+if os.path.exists("faiss_index.zip"):
+    with zipfile.ZipFile("faiss_index.zip", "r") as zip_ref:
+        zip_ref.extractall("content/")
+
+# Install required packages (only needed locally; on Streamlit Cloud use requirements.txt instead)
+# subprocess.run(["pip", "install", "torch", "langchain", "transformers", "sentence-transformers", "faiss-cpu"], check=True)
+
 
 faiss_index_folder = "/content/faiss_index"
 from huggingface_hub import login
