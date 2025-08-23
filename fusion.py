@@ -1,111 +1,132 @@
-from google.colab import files
-uploaded = files.upload()
-
-!unzip faiss_index.zip -d /content/
-
-!pip install torch langchain transformers sentence-transformers faiss-cpu langchain-community
-
-faiss_index_folder = "/content/faiss_index"
-from huggingface_hub import login
-
-login("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")
-
-import os
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import streamlit as st
+from pathlib import Path
+from huggingface_hub import InferenceClient
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
-FAISS_FOLDER = faiss_index_folder  # your FAISS folder
-EMBED_MODEL = "sentence-transformers/sentence-t5-large"  # same model used when creating FAISS
-LLM_MODEL = "meta-llama/Llama-2-7b-chat-hf"  # gated; needs HF token with access to gated models
-HF_TOKEN = os.getenv("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")  # set in env. Make sure this token has access to gated models if using a gated LLM.
+# ========== Streamlit Config ==========
+st.set_page_config(page_title="Fusion RAG Chatbot", page_icon="🤖", layout="centered")
+st.title("🤖 Fusion RAG Chatbot")
 
-# ====== Load FAISS ======
-# The LangChainDeprecationWarning is expected as HuggingFaceEmbeddings has moved to a new package.
-# For this example, using the current version is acceptable.
-embedding = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
-db = FAISS.load_local(FAISS_FOLDER, embedding, allow_dangerous_deserialization=True)
-retriever = db.as_retriever(search_kwargs={"k": 3})
+# ========== Config ==========
+HF_TOKEN = st.secrets["HF_TOKEN"]   # Hugging Face token stored in Streamlit secrets
+APP_DIR = Path(__file__).resolve().parent
+FAISS_DIR = APP_DIR / "faiss_index"
+INDEX_NAME = "index"
 
-# ====== Load LLaMA ======
-# The error "403 Forbidden" indicates that the Hugging Face token does not have permission to access
-# the gated 'meta-llama/Llama-2-7b-chat-hf' model.
-# To resolve this, ensure your Hugging Face token has access to gated models and update the 'HF_TOKEN'
-# secret in Colab, then restart the runtime.
-# Alternatively, you can use a non-gated model for demonstration purposes, e.g., "NousResearch/Llama-2-7b-chat-hf"
-tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL, use_auth_token=HF_TOKEN)
-model = AutoModelForCausalLM.from_pretrained(
-    LLM_MODEL,
-    use_auth_token=HF_TOKEN,
-    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto",
-    resume_download=True
-)
-# ====== Fusion RAG Components ======
+EMBED_MODEL = "sentence-transformers/sentence-t5-large"
+LLM_MODEL = "google/gemma-2-9b"   # or meta-llama/Llama-3.2-3b-instruct
+
+# ========== Cache Helpers ==========
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
+
+@st.cache_resource
+def load_faiss(_emb):
+    return FAISS.load_local(
+        folder_path=str(FAISS_DIR),
+        embeddings=_emb,
+        index_name=INDEX_NAME,
+        allow_dangerous_deserialization=True,
+    )
+
+@st.cache_resource
+def get_hf_client():
+    return InferenceClient(model=LLM_MODEL, token=HF_TOKEN)
+
+embeddings = load_embeddings()
+db = load_faiss(embeddings)
+retriever = db.as_retriever(search_kwargs={"k": 4})
+client = get_hf_client()
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# ========== Fusion RAG Utils ==========
 def generate_queries(original_query: str):
-    """Expand the original query into multiple related queries."""
     return [
         original_query,
         f"Explain in detail: {original_query}",
-        f"What are the advantages of {original_query}?",
-        f"What are the challenges or limitations of {original_query}?",
+        f"What are the benefits of {original_query}?",
+        f"What are the challenges or drawbacks of {original_query}?",
         f"Give a real-world application of {original_query}"
     ]
 
 def reciprocal_rank_fusion(results_dict, k=60):
-    """Fuse rankings from multiple queries."""
+    """Fuse multiple retrieval results using RRF."""
     fused_scores = {}
-    for query, docs in results_dict.items():
+    for q, docs in results_dict.items():
         for rank, doc in enumerate(docs):
             fused_scores[doc.page_content] = fused_scores.get(doc.page_content, 0) + 1 / (rank + k)
     return sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
 
-# ====== Fusion RAG Answer ======
-def fusion_rag_answer(query):
+def fusion_rag_answer(query: str):
+    # 1️ Generate multiple queries
     expanded_queries = generate_queries(query)
-    all_results = {}
 
-    # Step 1: Retrieve docs for each query
-    for q in expanded_queries:
-        docs = retriever.get_relevant_documents(q)
-        all_results[q] = docs
+    # 2️ Retrieve documents for each query
+    all_results = {q: retriever.get_relevant_documents(q) for q in expanded_queries}
 
-    # Step 2: Fuse results
+    # 3️ Fuse results
     reranked = reciprocal_rank_fusion(all_results)
 
-    # Step 3: Build context (top 5 passages)
+    # 4️ Build context from top docs
     top_passages = [doc for doc, _ in reranked[:5]]
     context = "\n\n".join(top_passages)
 
-    # Step 4: Create prompt for LLaMA
+    # 5️ Create prompt
     prompt = f"""
-   You are a helpful assistant. Use only the information provided in the context to answer the user’s question.
+Imagine you are chatting with me as my study buddy. 
+I’ll give you some context, and you need to answer my question based on it.  
 
-Instructions:
-- Base your answer strictly on the context. Do not use outside knowledge.
-- If the context does not fully answer the question, say: "The context does not provide this information."
-- Summarize clearly and concisely.
-- Highlight key details directly from the context.
-- If multiple pieces of evidence are relevant, integrate them into a well-structured response.
-- Prefer short paragraphs or bullet points for clarity
+Here’s how I’d like you to reply:
+- Stick only to the details from the context. 
+- If the context doesn’t cover it, just say: 
+  "The context does not provide this information."
+- Write in a friendly, easy-to-follow way. 
+- Feel free to break things into short bullets if it helps."
 
-    Context:
-    {context}
+Context:
+{context}
 
-    Question: {query}
-    Answer:
-    """
+Question: {query}
 
-    # Step 5: Generate answer
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=256)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+Final Answer:
+"""
 
-# ====== Chat Loop ======
-print("Fusion RAG Chatbot Ready. Type 'exit' to quit.")
-while True:
-    q = input("\nYou: ")
-    if q.lower() in ["exit", "quit"]:
-        break
-    print("\nBot:", fusion_rag_answer(q))
+    # 6️ Query Hugging Face Inference
+    response = client.text_generation(
+        prompt,
+        max_new_tokens=350,
+        temperature=0.2,
+        do_sample=False,
+        stream=False,
+    )
+
+    # 7️ Extract Answer
+    raw_answer = ""
+    if isinstance(response, str):
+        raw_answer = response
+    elif isinstance(response, dict) and "generated_text" in response:
+        raw_answer = response["generated_text"]
+    elif isinstance(response, list) and "generated_text" in response[0]:
+        raw_answer = response[0]["generated_text"]
+
+    return raw_answer.split("Final Answer:", 1)[-1].strip()
+
+# ========== UI ==========
+query = st.text_input("Ask me something:")
+
+if query:
+    with st.spinner("Thinking..."):
+        answer = fusion_rag_answer(query)
+        st.session_state.chat_history.append({"question": query, "answer": answer})
+
+# Display Chat History
+if st.session_state.chat_history:
+    st.subheader("🤖 Conversation History")
+    for i, chat in enumerate(st.session_state.chat_history, 1):
+        st.markdown(f"**Q{i}:** {chat['question']}")
+        st.markdown(f"**A{i}:** {chat['answer']}")
+        st.markdown("---")
